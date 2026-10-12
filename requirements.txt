@@ -1,6 +1,3 @@
 streamlit
 edge-tts
 srt
-pydub
-scipy
-simpleaudio
