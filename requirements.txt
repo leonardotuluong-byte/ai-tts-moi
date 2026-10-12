@@ -1,3 +1,2 @@
 streamlit
-edge-tts>=7.0.0
-gTTS
+edge-tts>=6.1.12
