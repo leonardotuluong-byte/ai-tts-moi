@@ -1,117 +1,123 @@
 import streamlit as st
-import edge_tts
-from gtts import gTTS
 import asyncio
+import edge_tts
 import tempfile
 import os
 
+# Cấu hình giao diện Streamlit
 st.set_page_config(
-    page_title="TTS App - Đa Ngôn Ngữ Không Giới Hạn",
+    page_title="AI TTS Pro - Kho Giọng Đọc Đa Ngôn Ngữ",
     page_icon="🎙️",
     layout="centered"
 )
 
-st.title("🎙️ Ứng dụng Chuyển Văn Bản Thành Giọng Nói")
-st.write("Hỗ trợ tiếng Tây Ban Nha, Anh, Pháp, Việt và nhiều giọng đọc tự nhiên. Tự động khắc phục lỗi kết nối server!")
+st.title("🎙️ AI TTS Pro - Kho Giọng Đọc Microsoft Edge")
+st.write("Hệ thống chuyển đổi văn bản thành giọng nói với đầy đủ kho giọng nói tự nhiên, không giới hạn ký tự.")
 
-# Danh sách ngôn ngữ cố định an toàn
-LANGUAGE_CONFIG = {
-    "🇪🇸 Tiếng Tây Ban Nha (Spanish)": {
-        "gtts_code": "es",
-        "voices": [
-            {"name": "Microsoft Alvaro (Nam) - US", "code": "es-US-AlvaroNeural"},
-            {"name": "Microsoft Paloma (Nữ) - US", "code": "es-US-PalomaNeural"},
-            {"name": "Microsoft Elvira (Nữ) - Tây Ban Nha", "code": "es-ES-ElviraNeural"},
-            {"name": "Microsoft Alvaro (Nam) - Tây Ban Nha", "code": "es-ES-AlvaroNeural"},
-            {"name": "Microsoft Dalia (Nữ) - Mexico", "code": "es-MX-DaliaNeural"}
-        ]
-    },
-    "🇬🇧/🇺🇸 Tiếng Anh (English)": {
-        "gtts_code": "en",
-        "voices": [
-            {"name": "Microsoft Jenny (Nữ) - US", "code": "en-US-JennyNeural"},
-            {"name": "Microsoft Guy (Nam) - US", "code": "en-US-GuyNeural"},
-            {"name": "Microsoft Sonia (Nữ) - Anh", "code": "en-GB-SoniaNeural"},
-            {"name": "Microsoft Ryan (Nam) - Anh", "code": "en-GB-RyanNeural"}
-        ]
-    },
-    "🇫🇷 Tiếng Pháp (French)": {
-        "gtts_code": "fr",
-        "voices": [
-            {"name": "Microsoft Denise (Nữ) - Pháp", "code": "fr-FR-DeniseNeural"},
-            {"name": "Microsoft Henri (Nam) - Pháp", "code": "fr-FR-HenriNeural"},
-            {"name": "Microsoft Sylvie (Nữ) - Canada", "code": "fr-CA-SylvieNeural"}
-        ]
-    },
-    "🇻🇳 Tiếng Việt (Vietnamese)": {
-        "gtts_code": "vi",
-        "voices": [
-            {"name": "Microsoft HoaiMy (Nữ) - Việt Nam", "code": "vi-VN-HoaiMyNeural"},
-            {"name": "Microsoft NamMinh (Nam) - Việt Nam", "code": "vi-VN-NamMinhNeural"}
-        ]
-    }
-}
+# =========================================================================
+# 1. TẢI TOÀN BỘ KHO GIỌNG ĐỌC TỪ EDGE TTS
+# =========================================================================
+@st.cache_resource
+def get_all_voices():
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        voices = loop.run_until_complete(edge_tts.list_voices())
+        loop.close()
+        return voices
+    except Exception as e:
+        st.error(f"Lỗi kết nối lấy kho giọng đọc: {e}")
+        return []
 
-# Chọn nhóm ngôn ngữ
-selected_lang_name = st.selectbox("Chọn nhóm ngôn ngữ:", list(LANGUAGE_CONFIG.keys()))
-lang_data = LANGUAGE_CONFIG[selected_lang_name]
+with st.spinner("Đang tải toàn bộ kho giọng đọc từ hệ thống..."):
+    ALL_VOICES = get_all_voices()
 
-# Chọn giọng đọc
-voice_options = {v["name"]: v["code"] for v in lang_data["voices"]}
-selected_voice_label = st.selectbox("Chọn giọng đọc:", list(voice_options.keys()))
-selected_voice_code = voice_options[selected_voice_label]
+if ALL_VOICES:
+    LOCALES = sorted(list(set([v['Locale'] for v in ALL_VOICES])))
+    
+    # Mặc định ưu tiên chọn tiếng Tây Ban Nha hoặc tiếng Việt nếu có
+    default_locale = "es-ES" if "es-ES" in LOCALES else (LOCALES[0] if LOCALES else "")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        # Lọc theo ngôn ngữ
+        selected_locale = st.selectbox(
+            "🌐 Chọn ngôn ngữ (Locale):", 
+            options=LOCALES, 
+            index=LOCALES.index(default_locale) if default_locale in LOCALES else 0
+        )
+    with col2:
+        # Lọc theo giới tính
+        selected_gender = st.radio(
+            "👤 Giới tính:", 
+            options=["All", "Male", "Female"], 
+            horizontal=True
+        )
 
-# Nhập văn bản
-text_input = st.text_area(
-    "Nhập nội dung văn bản:",
-    placeholder="Dán văn bản tiếng Tây Ban Nha, Anh, Pháp hoặc Việt vào đây...",
-    height=200
-)
+    # Lọc danh sách giọng đọc dựa trên ngôn ngữ và giới tính
+    filtered_voices = [v for v in ALL_VOICES if v['Locale'] == selected_locale]
+    if selected_gender != "All":
+        filtered_voices = [v for v in filtered_voices if v['Gender'] == selected_gender]
 
-# Hàm gọi Edge TTS
-async def run_edge_tts(text, voice_code, output_path):
-    communicate = edge_tts.Communicate(text=text, voice=voice_code)
-    await communicate.save(output_path)
-
-if st.button("🎧 Tạo và Phát Âm Thanh", type="primary"):
-    if not text_input.strip():
-        st.warning("Vui lòng nhập văn bản trước!")
+    voice_choices = [v['ShortName'] for v in filtered_voices]
+    
+    if voice_choices:
+        selected_voice = st.selectbox(
+            "🎙️ Chọn giọng đọc cụ thể:", 
+            options=voice_choices,
+            format_func=lambda x: next((f"{v['FriendlyName']} ({v['Gender']}) - [{v['ShortName']}]" for v in filtered_voices if v['ShortName'] == x), x)
+        )
     else:
-        with st.spinner("Đang xử lý âm thanh..."):
-            success = False
-            output_path = ""
-            
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
-                output_path = tmp_file.name
+        st.warning("Không tìm thấy giọng đọc phù hợp với bộ lọc này.")
+        selected_voice = None
 
-            # Thử 1: Dùng Edge TTS
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(run_edge_tts(text_input, selected_voice_code, output_path))
-                loop.close()
-                success = True
-                st.success("🎉 Tạo âm thanh thành công (Edge Voice)!")
-            except Exception as e_edge:
-                # Nếu Edge TTS dính 403 (Server IP bị cấm), tự động dùng gTTS
-                st.info("🔄 Server Edge bị chặn kết nối (403), đang chuyển sang kênh dự phòng...")
+    # =========================================================================
+    # 2. KHU VỰC NHẬP VĂN BẢN VÀ XỬ LÝ ÂM THANH
+    # =========================================================================
+    text_input = st.text_area(
+        "📝 Nhập nội dung văn bản cần chuyển đổi:",
+        placeholder="Dán đoạn văn bản dài của bạn vào đây...",
+        height=200
+    )
+
+    async def generate_edge_tts(text, voice_code, output_path):
+        communicate = edge_tts.Communicate(text, voice_code, rate="+0%")
+        await communicate.save(output_path)
+
+    if st.button("🚀 Bắt đầu chuyển đổi giọng nói", type="primary"):
+        if not text_input.strip():
+            st.warning("Vui lòng nhập văn bản trước khi thực hiện!")
+        elif not selected_voice:
+            st.warning("Vui lòng chọn một giọng đọc hợp lệ!")
+        else:
+            with st.spinner("Đang tổng hợp giọng nói từ máy chủ Microsoft..."):
                 try:
-                    tts_backup = gTTS(text=text_input, lang=lang_data["gtts_code"], slow=False)
-                    tts_backup.save(output_path)
-                    success = True
-                    st.success("🎉 Tạo âm thanh thành công (Kênh dự phòng Google TTS)!")
-                except Exception as e_backup:
-                    st.error(f"Lỗi khởi tạo âm thanh: {e_backup}")
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
+                        output_path = tmp_file.name
 
-            if success and os.path.exists(output_path):
-                st.audio(output_path, format="audio/mp3")
+                    # Chạy tiến trình bất đồng bộ tạo audio đúng giọng
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(generate_edge_tts(text_input, selected_voice, output_path))
+                    loop.close()
 
-                with open(output_path, "rb") as f:
-                    audio_bytes = f.read()
+                    st.success("🎉 Tạo âm thanh thành công đúng với giọng đã chọn!")
+                    
+                    # Phát trực tiếp trên giao diện
+                    st.audio(output_path, format="audio/mp3")
 
-                st.download_button(
-                    label="📥 Tải xuống file MP3",
-                    data=audio_bytes,
-                    file_name="tts_audio.mp3",
-                    mime="audio/mp3"
-                )
+                    # Nút tải xuống file
+                    with open(output_path, "rb") as f:
+                        audio_bytes = f.read()
+
+                    st.download_button(
+                        label="📥 Tải xuống file MP3",
+                        data=audio_bytes,
+                        file_name="edge_tts_output.mp3",
+                        mime="audio/mp3"
+                    )
+
+                except Exception as e:
+                    st.error(f"Đã xảy ra lỗi trong quá trình tạo âm thanh: {e}")
+else:
+    st.error("Không thể tải danh sách giọng đọc. Vui lòng kiểm tra lại kết nối mạng hoặc khởi động lại ứng dụng.")
