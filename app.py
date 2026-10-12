@@ -4,9 +4,6 @@ import os
 import subprocess
 import tempfile
 import edge_tts
-from pydub import AudioSegment, silence
-from pydub.effects import normalize
-from pydub.scipy_effects import low_pass_filter
 import srt
 import streamlit as st
 
@@ -14,10 +11,6 @@ import streamlit as st
 st.set_page_config(
     page_title="AI TTS Pro - Streamlit", page_icon="🎙️", layout="wide"
 )
-
-# =========================================================================
-# 1. LẤY DANH SÁCH GIỌNG ĐỌC (Được cache để tối ưu khởi động)
-# =========================================================================
 
 
 @st.cache_resource
@@ -40,79 +33,6 @@ LOCALES = (
 DEFAULT_LOCALE = "es-ES" if "es-ES" in LOCALES else LOCALES[0]
 
 
-def trim_audio_silence(audio_segment):
-  """Cắt khoảng lặng 2 đầu một cách nhẹ nhàng"""
-  if len(audio_segment) < 100:
-    return audio_segment
-  try:
-    start_trim = silence.detect_leading_silence(
-        audio_segment, silence_threshold=-40.0
-    )
-    end_trim = silence.detect_leading_silence(
-        audio_segment.reverse(), silence_threshold=-40.0
-    )
-
-    start_trim = max(0, start_trim - 20)
-    end_trim = max(0, end_trim - 20)
-
-    if start_trim + end_trim >= len(audio_segment):
-      return audio_segment
-
-    return audio_segment[start_trim : len(audio_segment) - end_trim]
-  except Exception as e:
-    print(f"Lỗi khi cắt khoảng lặng: {e}")
-    return audio_segment
-
-
-# =========================================================================
-# 2. HÀM CO GIÃN THỜI GIAN CHUYÊN NGHIỆP BẰNG FFMPEG (ATEMPO)
-# =========================================================================
-def stretch_audio_ffmpeg(audio_segment, factor):
-  """Sử dụng thuật toán atempo của FFmpeg để tăng tốc mượt mà không nuốt chữ"""
-  if factor <= 1.0:
-    return audio_segment
-
-  safe_factor = min(factor, 1.35)
-
-  with tempfile.NamedTemporaryFile(
-      suffix=".wav", delete=False
-  ) as temp_in, tempfile.NamedTemporaryFile(
-      suffix=".wav", delete=False
-  ) as temp_out:
-    try:
-      audio_segment.export(temp_in.name, format="wav")
-
-      cmd = [
-          "ffmpeg",
-          "-y",
-          "-i",
-          temp_in.name,
-          "-filter:a",
-          f"atempo={safe_factor}",
-          temp_out.name,
-      ]
-      subprocess.run(
-          cmd,
-          check=True,
-          stdout=subprocess.DEVNULL,
-          stderr=subprocess.DEVNULL,
-      )
-
-      stretched_seg = AudioSegment.from_wav(temp_out.name)
-      return stretched_seg
-    except Exception as e:
-      print(f"⚠️ Lỗi FFmpeg atempo, giữ nguyên tốc độ gốc: {e}")
-      return audio_segment
-    finally:
-      if os.path.exists(temp_in.name):
-        os.remove(temp_in.name)
-      if os.path.exists(temp_out.name):
-        os.remove(temp_out.name)
-
-
-# =========================================================================
-# 3. HÀM GỌI TTS BẤT ĐỒNG BỘ (CHỐNG RATE LIMIT & LOG LỖI)
-# =========================================================================
 async def run_tts_with_retry(text, voice_code, retries=5):
   text = text.strip()
   if not text:
@@ -136,13 +56,9 @@ async def run_tts_with_retry(text, voice_code, retries=5):
       await asyncio.sleep(1.5 * (attempt + 1))
       continue
 
-  print(f"❌ LỖI NẶNG: Thất bại hoàn toàn với câu: '{text}' sau {retries} lần.")
   return None
 
 
-# =========================================================================
-# 4. LÕI XỬ LÝ ÂM THANH CHÍNH
-# =========================================================================
 async def process_audio(input_text, voice):
   if not input_text or not input_text.strip():
     return None, "❌ Vui lòng nhập kịch bản!"
@@ -155,14 +71,9 @@ async def process_audio(input_text, voice):
     if not is_srt:
       res = await run_tts_with_retry(input_text, voice)
       if res:
-        seg = AudioSegment.from_file(io.BytesIO(res), format="mp3")
-        seg = seg.set_frame_rate(44100).set_channels(1).set_sample_width(2)
-        seg = low_pass_filter(seg, cutoff_freq=8000)
-        seg = normalize(seg)
-
-        temp_out = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-        seg.export(temp_out.name, format="mp3", bitrate="192k")
-        return temp_out.name, "✅ Xử lý văn bản thường thành công!"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
+          f.write(res)
+          return f.name, "✅ Xử lý văn bản thường thành công!"
       return None, "❌ Lỗi: Không thể tải giọng đọc từ máy chủ."
 
     else:
@@ -170,9 +81,8 @@ async def process_audio(input_text, voice):
       if not subs:
         return None, "❌ SRT không hợp lệ!"
 
-      final_audio = AudioSegment.silent(
-          duration=0, frame_rate=44100
-      ).set_channels(1).set_sample_width(2)
+      # Danh sách chứa các file âm thanh tạm của từng dòng
+      temp_files = []
       failed_lines = []
 
       for i, sub in enumerate(subs):
@@ -181,55 +91,77 @@ async def process_audio(input_text, voice):
           continue
 
         chunk = await run_tts_with_retry(text_content, voice)
-
         if chunk:
-          seg = AudioSegment.from_file(io.BytesIO(chunk), format="mp3")
-          seg = seg.set_frame_rate(44100).set_channels(1).set_sample_width(2)
-
-          seg = normalize(seg)
-          seg = trim_audio_silence(seg)
+          # Lưu chunk thành file mp3 tạm
+          tf = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+          tf.write(chunk)
+          tf.close()
 
           srt_start_ms = int(sub.start.total_seconds() * 1000)
           duration_allowed_ms = (sub.end - sub.start).total_seconds() * 1000
-
           if duration_allowed_ms <= 0:
             duration_allowed_ms = 500
 
-          actual_duration_ms = len(seg)
-
-          if actual_duration_ms > duration_allowed_ms:
-            factor = actual_duration_ms / duration_allowed_ms
-            seg = stretch_audio_ffmpeg(seg, factor)
-
-          if len(final_audio) < srt_start_ms:
-            gap = srt_start_ms - len(final_audio)
-            final_audio += AudioSegment.silent(
-                duration=gap, frame_rate=44100
-            )
-
-          final_audio += seg
+          temp_files.append(
+              (srt_start_ms, duration_allowed_ms, tf.name, text_content)
+          )
         else:
           failed_lines.append(f"Dòng {i+1}")
 
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.3)
 
-      final_audio = low_pass_filter(final_audio, cutoff_freq=8000)
-      final_audio = normalize(final_audio)
+      if not temp_files:
+        return None, "❌ Không thể tạo được đoạn âm thanh nào từ SRT!"
 
-      temp_out = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-      final_audio.export(temp_out.name, format="mp3", bitrate="192k")
+      # Sử dụng FFmpeg để ghép nối các file có tính toán delay thời gian chính xác theo SRT
+      # Tạo file danh sách input cho ffmpeg concat hoặc sử dụng filter adelay
+      output_path = tempfile.NamedTemporaryFile(
+          delete=False, suffix=".mp3"
+      ).name
+
+      # Lệnh ghép đơn giản bằng bộ lọc filter_complex của ffmpeg với adelay
+      # Xây dựng câu lệnh ffmpeg cực kỳ mạnh mẽ để đồng bộ chính xác từng mốc thời gian SRT
+      inputs = []
+      filter_complex_parts = []
+
+      for idx, (start_ms, _, fpath, _) in enumerate(temp_files):
+        inputs.extend(["-i", fpath])
+        # Dịch chuyển thời điểm bắt đầu bằng adelay (tính bằng mili-giây)
+        filter_complex_parts.append(
+            f"[{idx}:a]adelay={start_ms}|{start_ms}[a{idx}]"
+        )
+
+      # Trộn tất cả các luồng âm thanh lại với nhau
+      mix_inputs = "".join([f"[a{idx}]" for idx in range(len(temp_files))])
+      filter_complex_parts.append(
+          f"{mix_inputs}amix=inputs={len(temp_files)}:duration=longest[out]"
+      )
+
+      cmd = [
+          "ffmpeg",
+          "-y",
+      ] + inputs + ["-filter_complex", ";".join(filter_complex_parts), "-map", "[out]", output_path]
+
+      subprocess.run(
+          cmd,
+          check=True,
+          stdout=subprocess.DEVNULL,
+          stderr=subprocess.DEVNULL,
+      )
+
+      # Dọn dẹp các file mp3 tạm của từng dòng
+      for _, _, fpath, _ in temp_files:
+        if os.path.exists(fpath):
+          os.remove(fpath)
 
       if failed_lines:
         msg = (
-            f"⚠️ Xong, nhưng có {len(failed_lines)} câu bị mất: "
-            f"{', '.join(failed_lines[:5])}..."
+            f"⚠️ Xong, nhưng có {len(failed_lines)} câu bị lỗi:"
+            f" {', '.join(failed_lines[:5])}"
         )
-        return temp_out.name, msg
+        return output_path, msg
 
-      return (
-          temp_out.name,
-          "✅ Hoàn thành xuất sắc! Âm thanh co giãn mượt mà nhờ FFmpeg.",
-      )
+      return output_path, "✅ Hoàn thành xuất sắc đồng bộ SRT bằng FFmpeg!"
 
   except Exception as e:
     print(f"LỖI HỆ THỐNG: {e}")
@@ -276,7 +208,6 @@ with col2:
         "👤 Giới tính", options=["All", "Male", "Female"], horizontal=True
     )
 
-  # Lọc danh sách giọng đọc theo lựa chọn
   filtered_voices = [v for v in ALL_VOICES if v["Locale"] == lang_filter]
   if gender_filter != "All":
     filtered_voices = [
@@ -294,7 +225,6 @@ with col2:
   output_audio_placeholder = st.empty()
   status_placeholder = st.empty()
 
-# Xử lý sự kiện khi bấm nút
 if process_btn:
   if os.name == "nt":
     try:
