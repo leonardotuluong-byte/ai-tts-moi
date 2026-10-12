@@ -66,22 +66,82 @@ async def process_audio(input_text, voice):
     return None, "❌ Vui lòng chọn giọng đọc!"
 
   try:
-    is_srt = " --> " in input_text
+    # Kiểm tra xem có phải định dạng SRT chuẩn hay không (phải có cấu trúc thời gian timestamp)
+    is_srt = " --> " in input_text and any(
+        "-->" in line for line in input_text.splitlines()
+    )
 
     if not is_srt:
-      res = await run_tts_with_retry(input_text, voice)
-      if res:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
-          f.write(res)
-          return f.name, "✅ Xử lý văn bản thường thành công!"
-      return None, "❌ Lỗi: Không thể tải giọng đọc từ máy chủ."
+      # Nếu là văn bản thường, chia nhỏ văn bản theo dấu chấm câu để tránh quá tải server edge-tts
+      paragraphs = [p.strip() for p in input_text.split("\n") if p.strip()]
+      if not paragraphs:
+        return None, "❌ Nội dung trống!"
+
+      combined_audio_chunks = []
+      for para in paragraphs:
+        # Tách tiếp theo câu nếu đoạn quá dài
+        sentences = [s.strip() for s in para.split(".") if s.strip()]
+        for sentence in sentences:
+          if not sentence:
+            continue
+          res = await run_tts_with_retry(sentence + ".", voice)
+          if res:
+            tf = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+            tf.write(res)
+            tf.close()
+            combined_audio_chunks.append(tf.name)
+          await asyncio.sleep(0.3)
+
+      if not combined_audio_chunks:
+        return None, (
+            "❌ Không thể tải giọng đọc từ máy chủ. Vui lòng thử lại sau!"
+        )
+
+      # Ghép các đoạn âm thanh văn bản thường lại bằng FFmpeg concat
+      list_file_path = tempfile.NamedTemporaryFile(
+          delete=False, mode="w", suffix=".txt", encoding="utf-8"
+      )
+      for fpath in combined_audio_chunks:
+        list_file_path.write(f"file '{fpath}'\n")
+      list_file_path.close()
+
+      output_path = tempfile.NamedTemporaryFile(
+          delete=False, suffix=".mp3"
+      ).name
+      cmd = [
+          "ffmpeg",
+          "-y",
+          "-f",
+          "concat",
+          "-safe",
+          "0",
+          "-i",
+          list_file_path.name,
+          "-c",
+          "copy",
+          output_path,
+      ]
+      subprocess.run(
+          cmd,
+          check=True,
+          stdout=subprocess.DEVNULL,
+          stderr=subprocess.DEVNULL,
+      )
+
+      # Dọn dẹp file tạm
+      os.remove(list_file_path.name)
+      for fpath in combined_audio_chunks:
+        if os.path.exists(fpath):
+          os.remove(fpath)
+
+      return output_path, "✅ Xử lý văn bản thường thành công!"
 
     else:
+      # Xử lý chuẩn file SRT
       subs = list(srt.parse(input_text))
       if not subs:
         return None, "❌ SRT không hợp lệ!"
 
-      # Danh sách chứa các file âm thanh tạm của từng dòng
       temp_files = []
       failed_lines = []
 
@@ -92,7 +152,6 @@ async def process_audio(input_text, voice):
 
         chunk = await run_tts_with_retry(text_content, voice)
         if chunk:
-          # Lưu chunk thành file mp3 tạm
           tf = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
           tf.write(chunk)
           tf.close()
@@ -113,25 +172,18 @@ async def process_audio(input_text, voice):
       if not temp_files:
         return None, "❌ Không thể tạo được đoạn âm thanh nào từ SRT!"
 
-      # Sử dụng FFmpeg để ghép nối các file có tính toán delay thời gian chính xác theo SRT
-      # Tạo file danh sách input cho ffmpeg concat hoặc sử dụng filter adelay
       output_path = tempfile.NamedTemporaryFile(
           delete=False, suffix=".mp3"
       ).name
-
-      # Lệnh ghép đơn giản bằng bộ lọc filter_complex của ffmpeg với adelay
-      # Xây dựng câu lệnh ffmpeg cực kỳ mạnh mẽ để đồng bộ chính xác từng mốc thời gian SRT
       inputs = []
       filter_complex_parts = []
 
       for idx, (start_ms, _, fpath, _) in enumerate(temp_files):
         inputs.extend(["-i", fpath])
-        # Dịch chuyển thời điểm bắt đầu bằng adelay (tính bằng mili-giây)
         filter_complex_parts.append(
             f"[{idx}:a]adelay={start_ms}|{start_ms}[a{idx}]"
         )
 
-      # Trộn tất cả các luồng âm thanh lại với nhau
       mix_inputs = "".join([f"[a{idx}]" for idx in range(len(temp_files))])
       filter_complex_parts.append(
           f"{mix_inputs}amix=inputs={len(temp_files)}:duration=longest[out]"
@@ -149,7 +201,6 @@ async def process_audio(input_text, voice):
           stderr=subprocess.DEVNULL,
       )
 
-      # Dọn dẹp các file mp3 tạm của từng dòng
       for _, _, fpath, _ in temp_files:
         if os.path.exists(fpath):
           os.remove(fpath)
@@ -232,7 +283,9 @@ if process_btn:
     except Exception:
       pass
 
-  with st.spinner("Đang xử lý âm thanh, vui lòng đợi..."):
+  with st.spinner(
+      "Đang xử lý âm thanh và gọi máy chủ, vui lòng đợi một chút..."
+  ):
     audio_path, status_msg = asyncio.run(
         process_audio(input_text, voice_dropdown)
     )
