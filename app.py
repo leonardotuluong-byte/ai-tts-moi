@@ -1,87 +1,108 @@
 import streamlit as st
 import edge_tts
 import asyncio
+import tempfile
 import os
 
-# Cấu hình trang Streamlit
+# Cấu hình giao diện trang
 st.set_page_config(
-    page_title="Edge TTS - Chuyển Văn Bản Thành Giọng Nói",
-    page_icon="🔊",
+    page_title="Edge TTS - Đa Ngôn Ngữ Không Giới Hạn",
+    page_icon="🌍",
     layout="centered"
 )
 
-st.title("🔊 Microsoft Edge Text-to-Speech")
-st.write("Chuyển đổi văn bản dài (không giới hạn ký tự) với đầy đủ các giọng đọc từ Microsoft Edge.")
+st.title("🌍 Ứng dụng Chuyển Văn Bản Thành Giọng Nói (Edge TTS)")
+st.write("Hỗ trợ tiếng Tây Ban Nha, Anh, Pháp, Việt và rất nhiều giọng đọc tự nhiên khác. Không giới hạn ký tự!")
 
-# Hàm bất đồng bộ lấy danh sách tất cả các giọng đọc khả dụng từ Edge
+# Hàm chạy bất đồng bộ để lấy danh sách giọng đọc an toàn cho Streamlit
 @st.cache_data
-def get_voices():
-    async def _fetch():
-        voices = await edge_tts.list_voices()
-        return voices
-    return asyncio.run(_fetch())
+def load_voices():
+    async def get_all():
+        return await edge_tts.list_voices()
+    
+    # Tạo một event loop mới tránh xung đột luồng
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    return loop.run_until_complete(get_all())
 
 # Tải danh sách giọng đọc
-try:
-    all_voices = get_voices()
-except Exception as e:
-    st.error(f"Không thể tải danh sách giọng đọc: {e}")
-    all_voices = []
+with st.spinner("Đang tải danh sách giọng đọc từ hệ thống..."):
+    try:
+        voices = load_voices()
+    except Exception as e:
+        st.error(f"Lỗi tải danh sách giọng đọc: {e}")
+        voices = []
 
-if all_voices:
-    # Lọc danh sách ngôn ngữ/quốc gia
-    languages = sorted(list(set([v["Locale"] for v in all_voices])))
+if voices:
+    # Định nghĩa các nhóm ngôn ngữ chính theo yêu cầu của bạn
+    language_mapping = {
+        "🇪🇸 Tiếng Tây Ban Nha (Spanish)": ["es-ES", "es-MX", "es-AR", "es-CO", "es-US"],
+        "🇬🇧/🇺🇸 Tiếng Anh (English)": ["en-US", "en-GB", "en-AU", "en-CA", "en-IN"],
+        "🇫🇷 Tiếng Pháp (French)": ["fr-FR", "fr-CA", "fr-CH", "fr-BE"],
+        "🇻🇳 Tiếng Việt (Vietnamese)": ["vi-VN"]
+    }
+
+    # Cho phép người dùng chọn nhóm ngôn ngữ
+    selected_group_label = st.selectbox("Chọn nhóm ngôn ngữ:", list(language_mapping.keys()))
     
-    # Mặc định chọn vi-VN nếu có
-    default_lang_index = languages.index("vi-VN") if "vi-VN" in languages else 0
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        selected_lang = st.selectbox("Chọn ngôn ngữ/mã quốc gia:", languages, index=default_lang_index)
-    
-    # Lọc các giọng đọc thuộc ngôn ngữ đã chọn
-    filtered_voices = [v for v in all_voices if v["Locale"] == selected_lang]
-    voice_options = {f"{v['FriendlyName']} ({v['Gender']})": v["ShortName"] for v in filtered_voices}
-    
-    with col2:
-        selected_voice_label = st.selectbox("Chọn giọng đọc:", list(voice_options.keys()))
+    # Lọc các mã locale thuộc nhóm đã chọn
+    valid_locales = language_mapping[selected_group_label]
+    filtered_voices = [v for v in voices if v["Locale"] in valid_locales]
+
+    if filtered_voices:
+        # Hiển thị danh sách giọng đọc tương ứng
+        voice_options = {f"{v['FriendlyName']} ({v['Gender']}) - [{v['Locale']}]": v["ShortName"] for v in filtered_voices}
+        
+        selected_voice_label = st.selectbox("Chọn giọng đọc cụ thể:", list(voice_options.keys()))
         selected_voice_code = voice_options[selected_voice_label]
+    else:
+        st.warning("Không tìm thấy giọng đọc cho nhóm ngôn ngữ này.")
+        selected_voice_code = None
 
-    # Nhập văn bản không giới hạn ký tự
+    # Ô nhập văn bản (Không giới hạn ký tự)
     text_input = st.text_area(
-        "Nhập nội dung văn bản (không giới hạn độ dài):",
-        placeholder="Dán đoạn văn bản dài của bạn vào đây...",
+        "Nhập nội dung văn bản cần chuyển đổi:",
+        placeholder="Dán văn bản dài của bạn vào đây...",
         height=200
     )
 
-    # Hàm tạo file âm thanh từ Edge TTS
-    async def generate_speech(text, voice, output_path):
-        communicate = edge_tts.Communicate(text, voice)
+    # Hàm xử lý tạo âm thanh bất đồng bộ
+    async def generate_audio(text, voice_code, output_path):
+        communicate = edge_tts.Communicate(text, voice_code)
         await communicate.save(output_path)
 
-    if st.button("🎧 Chuyển đổi âm thanh", type="primary"):
+    if st.button("🎧 Tạo và Phát Âm Thanh", type="primary"):
         if not text_input.strip():
-            st.warning("Vui lòng nhập văn bản trước khi thực hiện!")
+            st.warning("Vui lòng nhập văn bản trước khi chuyển đổi!")
+        elif not selected_voice_code:
+            st.warning("Vui lòng chọn giọng đọc hợp lệ!")
         else:
-            output_file = "output.mp3"
-            with st.spinner("Đang tạo file âm thanh..."):
+            with st.spinner("Đang xử lý âm thanh, vui lòng đợi trong giây lát..."):
                 try:
-                    asyncio.run(generate_speech(text_input, selected_voice_code, output_file))
+                    # Tạo file tạm thời để lưu audio
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
+                        output_path = tmp_file.name
+
+                    # Chạy hàm tạo audio an toàn bằng event loop riêng
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(generate_audio(text_input, selected_voice_code, output_path))
+
+                    st.success("🎉 Tạo âm thanh thành công!")
                     
-                    st.success("Tạo file âm thanh thành công!")
-                    
-                    # Phát file âm thanh trực tiếp trên web
-                    st.audio(output_file, format="audio/mp3")
-                    
-                    # Nút tải file về máy
-                    with open(output_file, "rb") as f:
-                        audio_data = f.read()
-                    
+                    # Phát trực tiếp trên giao diện
+                    st.audio(output_path, format="audio/mp3")
+
+                    # Nút tải xuống file MP3
+                    with open(output_path, "rb") as f:
+                        audio_bytes = f.read()
+
                     st.download_button(
                         label="📥 Tải xuống file MP3",
-                        data=audio_data,
-                        file_name="edge_tts_audio.mp3",
+                        data=audio_bytes,
+                        file_name="edge_tts_output.mp3",
                         mime="audio/mp3"
                     )
+
                 except Exception as e:
-                    st.error(f"Đã xảy ra lỗi trong quá trình xử lý: {e}")
+                    st.error(f"Đã xảy ra lỗi trong quá trình tạo âm thanh: {e}")
